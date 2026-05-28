@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .                      # build the image from your Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # Note the host is "db" -- the service name below, NOT an IP.
+      DATABASE_URL: postgres://postgres:postgres@db:5432/urlshortener
+    depends_on:
+      db:
+        condition: service_healthy   # wait until Postgres is actually READY, not just started
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: urlshortener
+    healthcheck:
+      # Postgres has its own readiness probe, same idea as your /readyz.
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
