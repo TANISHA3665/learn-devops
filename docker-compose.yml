@@ -6,9 +6,12 @@ services:
     environment:
       # Note the host is "db" -- the service name below, NOT an IP.
       DATABASE_URL: postgres://postgres:postgres@db:5432/urlshortener
+      REDIS_URL: redis://cache:6379  # host "cache" = the service name
     depends_on:
       db:
         condition: service_healthy   # wait until Postgres is actually READY, not just started
+      cache:
+        condition: service_healthy
 
   db:
     image: postgres:16
@@ -24,6 +27,15 @@ services:
       retries: 5
     volumes:
       - pgdata:/var/lib/postgresql/data
-
+    
+  cache:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # NOTE: no volume -- a cache is disposable on purpose.
+    
 volumes:
   pgdata:

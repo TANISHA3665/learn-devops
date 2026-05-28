@@ -1,12 +1,19 @@
 const express = require('express');
 const crypto = require('crypto');
 const { Pool } = require('pg');
+const Redis = require('ioredis');
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+const redis = new Redis(process.env.REDIS_URL);
+
+// If Redis hiccups, log it but DO NOT crash. The cache is optional.
+redis.on('error', (err) => log('warn', 'redis_error', { error: err.message }));
 
 // Logs go to stdout as structured JSON. In a container you never write to
 //    log files — the platform collects whatever you print to stdout.
@@ -14,7 +21,26 @@ function log(level, msg, extra = {}) {
   console.log(JSON.stringify({ level, msg, time: new Date().toISOString(), ...extra }));
 }
 
-// On startup, make sure our table exists. (A baby version of a "migration".)
+// --- Cache helpers. Both swallow errors so a dead cache becomes a cache MISS,
+//     never an outage. The app degrades to "slower", not "down". ---
+async function cacheGet(code) {
+  try { 
+    return await redis.get(`url:${code}`); 
+  }
+  catch (err) {
+    log('warn', 'cache_unavailable', { error: err.message }); return null;
+  }
+}
+
+async function cacheSet(code, target) {
+  try { 
+    await redis.set(`url:${code}`, target, 'EX', 3600); // expires after 1 hour
+  }
+  catch (err) { 
+    log('warn', 'cache_write_failed', { error: err.message }); 
+  }
+}
+
 async function init() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS urls (
@@ -59,13 +85,26 @@ app.post('/urls', async (req, res) => {
   res.status(201).json({ code, shortUrl: `/${code}` });
 });
  
-// Resolve a code -> redirect.
+// Cache-aside read path.
 app.get('/:code', async (req, res) => {
-  const { rows } = await pool.query('SELECT target FROM urls WHERE code = $1', [req.params.code]);
-  
+  const { code } = req.params;
+ 
+  // 1) Try the sticky note first.
+  const cached = await cacheGet(code);
+  if (cached) {
+    log('info', 'cache_hit', { code });
+    return res.redirect(302, cached);
+  }
+ 
+  // 2) Miss -> go to the db (Postgres).
+  log('info', 'cache_miss', { code });
+  const { rows } = await pool.query('SELECT target FROM urls WHERE code = $1', [code]);
   if (rows.length === 0) return res.status(404).json({ error: 'Not found' });
-  
-  res.redirect(302, rows[0].target);
+  const target = rows[0].target;
+ 
+  // 3) Jot it on the sticky note for next time.
+  await cacheSet(code, target);
+  res.redirect(302, target);
 });
  
 // Only start listening once the table is ready. If the DB is unreachable on
